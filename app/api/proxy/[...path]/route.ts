@@ -19,18 +19,24 @@ export async function POST(
         return forwardRaw(request, targetUrl);
     }
 
-    // ⭐⭐⭐ 核心修复：清理 thinking 模型不兼容的参数
-    const isThinking = body.model?.includes('thinking');
-
-    if (isThinking) {
-        body.temperature = 1;           // thinking 模型必须是 1
-        delete body.frequency_penalty;  // Claude 不支持
-        delete body.presence_penalty;   // Claude 不支持
+    // 修复 thinking 模型 temperature 必须为 1
+    if (body.model?.includes('thinking')) {
+        body.temperature = 1;
     }
 
-    // 即使非 thinking 模型也清理一下
-    if (body.frequency_penalty === 0) delete body.frequency_penalty;
-    if (body.presence_penalty === 0) delete body.presence_penalty;
+    // 删掉所有会导致中转站报错的参数
+    delete body.frequency_penalty;
+    delete body.presence_penalty;
+    delete body.top_p;
+    delete body.top_k;
+    delete body.logprobs;
+    delete body.top_logprobs;
+    delete body.logit_bias;
+    delete body.n;
+    delete body.seed;
+    delete body.user;
+    delete body.response_format;
+    delete body.service_tier;
 
     const newHeaders = buildHeaders(request);
 
