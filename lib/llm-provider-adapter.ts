@@ -587,6 +587,62 @@ function shouldEchoReasoningContent(config: ApiConfig): boolean {
         || model.includes("deepseek-r1");
 }
 
+// 真正静态的 marker 集合：这些在同一个角色对话中基本不变，可以安全缓存
+// 其余的（包含 {{timeContext}}、记忆、日程等宏展开的）视为动态内容
+const STATIC_SYSTEM_MARKERS = new Set([
+    "charDescription",
+    "charPersonality",
+    "personaDescription",
+    "worldInfoBefore",
+    "worldInfoAfter",
+    "characterRelations",
+    "dwellingContext",
+]);
+
+/**
+ * 把开头连续的 system 消息分为「静态」和「动态」两组。
+ * 静态（人设、性格、世界书等）→ 放进 Anthropic system 字段，打缓存断点，整个对话不变。
+ * 动态（含时间、记忆、日程等每轮可能变化的）→ 转为 user 消息注入到消息列表，
+ * 这样动态内容变化不会让静态 system 的缓存失效。
+ */
+function splitStaticDynamicSystem(messages: LlmRequestMessage[]): {
+    staticSystemText: string;
+    dynamicSystemText: string;
+    rest: LlmRequestMessage[];
+} {
+    let leading = 0;
+    while (leading < messages.length && messages[leading].role === "system") leading += 1;
+
+    const staticParts: string[] = [];
+    const dynamicParts: string[] = [];
+
+    for (let i = 0; i < leading; i++) {
+        const text = textFromContent(messages[i].content);
+        if (!text) continue;
+        const marker = messages[i].marker || "";
+        if (STATIC_SYSTEM_MARKERS.has(marker)) {
+            staticParts.push(text);
+        } else {
+            dynamicParts.push(text);
+        }
+    }
+
+    // 中间出现的 system 消息转为 user（和原来 splitLeadingSystemMessages 一样）
+    const rest = messages.slice(leading).map((message) => message.role === "system"
+        ? {
+            role: "user" as const,
+            content: message.content,
+            marker: message.marker ? `${message.marker} | protocol:user-from-system` : "protocol:user-from-system",
+        }
+        : message);
+
+    return {
+        staticSystemText: staticParts.join("\n\n"),
+        dynamicSystemText: dynamicParts.join("\n\n"),
+        rest,
+    };
+}
+
 function buildAnthropicRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
@@ -594,8 +650,28 @@ function buildAnthropicRequest(
     messages: LlmRequestMessage[],
     options: ProviderRequestOptions,
 ): LlmRequestPayload {
-    const { systemBlocks, rest } = splitLeadingSystemBlocks(messages);
-    const bodyMessages = compactAnthropicMessages(rest);
+    const { staticSystemText, dynamicSystemText, rest } = splitStaticDynamicSystem(messages);
+
+    // 把动态系统内容注入到消息列表里（作为 user 消息），插在最后一条消息之前
+    // 这样动态内容变化不会让静态 system 的缓存失效，且用户的最新消息仍然在最末尾
+    let messagesWithDynamic: LlmRequestMessage[];
+    if (dynamicSystemText && rest.length > 0) {
+        const dynamicMsg: LlmRequestMessage = {
+            role: "user" as const,
+            content: `[System Context]\n${dynamicSystemText}`,
+            marker: "protocol:dynamic-system",
+        };
+        // 插在最后一条消息之前
+        messagesWithDynamic = [
+            ...rest.slice(0, -1),
+            dynamicMsg,
+            rest[rest.length - 1],
+        ];
+    } else {
+        messagesWithDynamic = rest;
+    }
+
+    const bodyMessages = compactAnthropicMessages(messagesWithDynamic);
     // 在倒数第二条消息的最后一个 content block 上标记缓存断点
     // 这样除了最新 user 消息外，之前的历史都能命中缓存
     if (bodyMessages.length >= 2) {
@@ -617,7 +693,7 @@ function buildAnthropicRequest(
     if (enabled.has("temperature")) body.temperature = preset?.temperature ?? 0.8;
     if (preset && enabled.has("top_p")) body.top_p = preset.top_p ?? 1;
     if (enabled.has("top_k")) body.top_k = preset?.top_k ?? 0;
-    if (systemBlocks.length > 0) body.system = systemBlocks;
+    if (staticSystemText) body.system = [{ type: "text", text: staticSystemText, cache_control: { type: "ephemeral" } }];
     if (options.stream) body.stream = true;
     if (options.tools?.length) {
         body.tools = options.tools.map((tool) => ({
@@ -1014,3 +1090,4 @@ function messageForLog(message: LlmRequestMessage): { role: string; content: str
         marker: message.marker,
     };
 }
+
