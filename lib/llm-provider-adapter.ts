@@ -568,6 +568,14 @@ function buildAnthropicRequest(
 ): LlmRequestPayload {
     const { systemText: system, rest } = splitLeadingSystemMessages(messages);
     const bodyMessages = compactAnthropicMessages(rest);
+    // 在倒数第二条消息的最后一个 content block 上标记缓存断点
+    // 这样除了最新 user 消息外，之前的历史都能命中缓存
+    if (bodyMessages.length >= 2) {
+        const target = bodyMessages[bodyMessages.length - 2];
+        if (target.content.length > 0) {
+            (target.content[target.content.length - 1] as any).cache_control = { type: "ephemeral" };
+        }
+    }
     const enabled = resolveEnabledGenerationParameters(preset);
     const body: Record<string, unknown> = {
         model: config.defaultModel,
