@@ -50,13 +50,13 @@ export function buildRequestHeaders(config: ApiConfig, baseUrl: string): Record<
         "Content-Type": "application/json",
     };
 
-    if (config.provider === "Anthropic" && !config.baseUrl) {
-        // Native Anthropic API uses x-api-key
+    if (config.provider === "Anthropic") {
+        // Anthropic API（含中转站）uses x-api-key + 缓存 beta 头
         headers["x-api-key"] = config.apiKey;
         headers["anthropic-version"] = "2023-06-01";
         headers["anthropic-beta"] = "prompt-caching-2024-07-31";
     } else {
-        // All others (including Anthropic via proxy/relay) use Bearer token
+        // All others use Bearer token
         headers["Authorization"] = `Bearer ${config.apiKey}`;
     }
 
@@ -76,7 +76,7 @@ export function buildRequestHeaders(config: ApiConfig, baseUrl: string): Record<
  * behind OpenAI-compatible endpoints should use Custom provider + baseUrl.
  */
 export function isNativeAnthropicApi(config: ApiConfig): boolean {
-    return config.provider === "Anthropic" && !config.baseUrl;
+    return config.provider === "Anthropic";
 }
 
 /**
