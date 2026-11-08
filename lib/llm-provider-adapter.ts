@@ -203,6 +203,34 @@ function ensureProviderHasUserMessage(messages: LlmRequestMessage[]): LlmRequest
 }
 
 /**
+ * 把开头连续的 system 消息拆成独立的 text block 数组（用于 Anthropic system 字段），
+ * 并在第一个 block（通常是人设，最大最稳定）上打缓存断点。
+ * 后续 block 可能含动态内容（时间、记忆），不打断点 → 变了也不会让第一个 block 的缓存作废。
+ */
+function splitLeadingSystemBlocks(messages: LlmRequestMessage[]): { systemBlocks: any[]; rest: LlmRequestMessage[] } {
+    let leading = 0;
+    while (leading < messages.length && messages[leading].role === "system") leading += 1;
+    const systemBlocks: any[] = [];
+    for (let i = 0; i < leading; i++) {
+        const text = textFromContent(messages[i].content);
+        if (!text) continue;
+        systemBlocks.push({ type: "text", text });
+    }
+    // 在第一个 block 上打缓存断点（人设/规则，每轮不变）
+    if (systemBlocks.length > 0) {
+        systemBlocks[0].cache_control = { type: "ephemeral" };
+    }
+    const rest = messages.slice(leading).map((message) => message.role === "system"
+        ? {
+            role: "user" as const,
+            content: message.content,
+            marker: message.marker ? `${message.marker} | protocol:user-from-system` : "protocol:user-from-system",
+        }
+        : message);
+    return { systemBlocks, rest };
+}
+
+/**
  * Anthropic/Gemini 的消息数组不接受 system 角色：开头连续的 system 提取为顶层
  * system / systemInstruction；插在历史中间的 system（@Depth 注入、系统指令等）
  * 原位转为 user 角色，保留位置语义，避免被整体挪到最前面。
@@ -566,7 +594,7 @@ function buildAnthropicRequest(
     messages: LlmRequestMessage[],
     options: ProviderRequestOptions,
 ): LlmRequestPayload {
-    const { systemText: system, rest } = splitLeadingSystemMessages(messages);
+    const { systemBlocks, rest } = splitLeadingSystemBlocks(messages);
     const bodyMessages = compactAnthropicMessages(rest);
     // 在倒数第二条消息的最后一个 content block 上标记缓存断点
     // 这样除了最新 user 消息外，之前的历史都能命中缓存
@@ -589,7 +617,7 @@ function buildAnthropicRequest(
     if (enabled.has("temperature")) body.temperature = preset?.temperature ?? 0.8;
     if (preset && enabled.has("top_p")) body.top_p = preset.top_p ?? 1;
     if (enabled.has("top_k")) body.top_k = preset?.top_k ?? 0;
-    if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
+    if (systemBlocks.length > 0) body.system = systemBlocks;
     if (options.stream) body.stream = true;
     if (options.tools?.length) {
         body.tools = options.tools.map((tool) => ({
