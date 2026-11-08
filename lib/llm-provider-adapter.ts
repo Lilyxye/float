@@ -559,9 +559,6 @@ function shouldEchoReasoningContent(config: ApiConfig): boolean {
         || model.includes("deepseek-r1");
 }
 
-// 每轮都可能变化的 leading system marker，不能放在 system 字段里缓存
-const DYNAMIC_LEADING_MARKERS = new Set(["calendarSchedule", "memoryCore", "memoryLongTerm"]);
-
 function buildAnthropicRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
@@ -569,46 +566,8 @@ function buildAnthropicRequest(
     messages: LlmRequestMessage[],
     options: ProviderRequestOptions,
 ): LlmRequestPayload {
-    // 把开头连续 system 消息拆成 静态(人设/世界书) + 动态(记忆/日程)
-    let leading = 0;
-    while (leading < messages.length && messages[leading].role === "system") leading += 1;
-    const staticParts: string[] = [];
-    const dynamicParts: string[] = [];
-    for (let i = 0; i < leading; i++) {
-        const text = textFromContent(messages[i].content);
-        if (!text) continue;
-        if (DYNAMIC_LEADING_MARKERS.has(messages[i].marker || "")) {
-            dynamicParts.push(text);
-        } else {
-            staticParts.push(text);
-        }
-    }
-    const staticSystem = staticParts.join("\n\n");
-    const dynamicSystem = dynamicParts.join("\n\n");
-    // 中间的 system 消息转 user（和原逻辑一致）
-    const rest = messages.slice(leading).map((message) => message.role === "system"
-        ? { role: "user" as const, content: message.content, marker: message.marker ? `${message.marker} | protocol:user-from-system` : "protocol:user-from-system" }
-        : message);
-
+    const { systemText: system, rest } = splitLeadingSystemMessages(messages);
     const bodyMessages = compactAnthropicMessages(rest);
-
-    // 把动态系统内容追加到最后一条 user 消息的 content 数组末尾
-    // 这样不会创建新消息，模型不会把它误解为用户说的话
-    if (dynamicSystem && bodyMessages.length > 0) {
-        const lastMsg = bodyMessages[bodyMessages.length - 1];
-        if (lastMsg.role === "user") {
-            lastMsg.content.push({ type: "text", text: dynamicSystem });
-        }
-    }
-
-    // 在倒数第二条消息的最后一个 content block 上标记缓存断点
-    // 这样除了最新 user 消息外，之前的历史都能命中缓存
-    if (bodyMessages.length >= 2) {
-        const target = bodyMessages[bodyMessages.length - 2];
-        if (target.content.length > 0) {
-            (target.content[target.content.length - 1] as any).cache_control = { type: "ephemeral" };
-        }
-    }
     const enabled = resolveEnabledGenerationParameters(preset);
     const body: Record<string, unknown> = {
         model: config.defaultModel,
@@ -622,7 +581,7 @@ function buildAnthropicRequest(
     if (enabled.has("temperature")) body.temperature = preset?.temperature ?? 0.8;
     if (preset && enabled.has("top_p")) body.top_p = preset.top_p ?? 1;
     if (enabled.has("top_k")) body.top_k = preset?.top_k ?? 0;
-    if (staticSystem) body.system = [{ type: "text", text: staticSystem, cache_control: { type: "ephemeral" } }];
+    if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
     if (options.stream) body.stream = true;
     if (options.tools?.length) {
         body.tools = options.tools.map((tool) => ({
