@@ -54,6 +54,7 @@ export function buildRequestHeaders(config: ApiConfig, baseUrl: string): Record<
         // Native Anthropic API uses x-api-key
         headers["x-api-key"] = config.apiKey;
         headers["anthropic-version"] = "2023-06-01";
+        headers["anthropic-beta"] = "prompt-caching-2024-07-31";
     } else {
         // All others (including Anthropic via proxy/relay) use Bearer token
         headers["Authorization"] = `Bearer ${config.apiKey}`;
