@@ -123,13 +123,22 @@ export function buildSimpleLLMRequest(
             .filter(m => m.role !== "system")
             .map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
         const systemMsg = messages.find(m => m.role === "system");
+        // 缓存断点：system prompt
+        const systemBlock = systemMsg
+            ? [{ type: "text", text: systemMsg.content, cache_control: { type: "ephemeral" } }]
+            : undefined;
+        // 缓存断点：倒数第二条消息（让历史命中缓存）
+        if (anthropicMessages.length >= 2) {
+            const target = anthropicMessages[anthropicMessages.length - 2] as any;
+            target.content = [{ type: "text", text: target.content, cache_control: { type: "ephemeral" } }];
+        }
         return {
             url: `${baseUrl.replace(/\/$/, "")}/messages`,
             headers,
             body: JSON.stringify({
                 model: config.defaultModel,
                 messages: anthropicMessages,
-                ...(systemMsg ? { system: systemMsg.content } : {}),
+                ...(systemBlock ? { system: systemBlock } : {}),
                 temperature,
                 // Anthropic requires max_tokens. Keep this helper aligned with
                 // the main chat engine instead of silently capping output low.
